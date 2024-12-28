@@ -6,15 +6,14 @@ import jpegdec
 from presto import Presto
 from time import time, sleep
 import network
-import secrets  # Import Wi-Fi credentials
+import secrets
 
-# Setup for Presto display with ambient lighting enabled
+# Initialize Presto with ambient lighting enabled
 presto = Presto(ambient_light=True)
 display = presto.display
 WIDTH, HEIGHT = display.get_bounds()
 
-# Initialize JPEG Decoder
-j = jpegdec.JPEG(display)
+jpeg = jpegdec.JPEG(display)
 
 # Directory on SD card to save images
 SD_DIR = "/sd/gallery"
@@ -33,13 +32,94 @@ prompts = [
     "retro wave sci-fi space with glowing planets and stars"
 ]
 
-# Choose full resolution (480x480) or scaled resolution for faster display
-full_res = True # Set to False for scaled resolution (faster)
-
-# Generate a unique prompt by appending a timestamp
+# Generate a unique prompt
 def generate_unique_prompt(base_prompt):
+    """
+    Appends a timestamp to the base prompt to ensure each prompt is unique.
+    """
     timestamp = int(time())
     return f"{base_prompt} {timestamp}"
+
+# Delete all files in the gallery directory
+def clear_gallery():
+    try:
+        files = uos.listdir(SD_DIR)
+        for file in files:
+            filepath = f"{SD_DIR}/{file}"
+            uos.remove(filepath)
+            print(f"Deleted: {filepath}")
+        print("Gallery cleared.")
+    except OSError as e:
+        print(f"Error clearing gallery: {e}")
+
+# Overlapping fade-out and fade-in
+def fade_between_images(prev_filepath, next_filepath):
+    # Brightness steps
+    brightness_steps = [i / 10.0 for i in range(11)]  # [0.0, 0.1, ..., 1.0]
+    fade_duration = 1.5  # Total fade time in seconds
+    step_delay = fade_duration / len(brightness_steps)  # Time per step
+
+    # Load both images on separate layers
+    display_image_on_layer(prev_filepath, 0)
+    display_image_on_layer(next_filepath, 1)
+
+    # Start with both layers visible
+    display.set_layer(0)  # Show the previous image
+    display.set_layer(1)  # Show the next image
+    display.update()
+
+    # Perform the fade
+    for step in range(len(brightness_steps)):
+        brightness = brightness_steps[step]  # Incremental brightness
+
+        # Gradually adjust backlight brightness
+        presto.set_backlight(brightness)
+        presto.update()
+        sleep(step_delay)
+
+    # Finalize the transition by showing only the next image
+    display.set_layer(1)  # Keep the next image visible
+    display.set_layer(0)  # Hide the previous image
+    presto.set_backlight(1.0)  # Ensure the backlight is fully on
+
+    # Delete the previous image file
+    try:
+        if prev_filepath:
+            uos.remove(prev_filepath)
+            print(f"Deleted previous image: {prev_filepath}")
+    except OSError as e:
+        print(f"Error deleting previous image: {e}")
+
+# Main photo viewer workflow
+def endless_photo_viewer():
+    connect_to_wifi()
+    mount_sd()
+    clear_gallery()  # Clear gallery at startup
+
+    prompt_index = 0
+    prev_filepath = None
+
+    while True:
+        # Generate prompt
+        base_prompt = prompts[prompt_index]
+        unique_prompt = generate_unique_prompt(base_prompt)
+
+        # Fetch image
+        image_data = fetch_image(unique_prompt)
+        if image_data:
+            next_filepath = save_image_to_sd(unique_prompt, image_data)
+            if next_filepath:
+                if prev_filepath:
+                    fade_between_images(prev_filepath, next_filepath)
+                else:
+                    # First image, display without fading
+                    display_image_on_layer(next_filepath, 0)
+                    presto.set_backlight(1.0)  # Ensure backlight is fully on
+                    presto.update()
+                prev_filepath = next_filepath
+
+        prompt_index = (prompt_index + 1) % len(prompts)
+        sleep(7)
 
 # Connect to Wi-Fi
 def connect_to_wifi():
@@ -63,34 +143,9 @@ def mount_sd():
                              mosi=machine.Pin(35, machine.Pin.OUT), 
                              miso=machine.Pin(36, machine.Pin.OUT))
         sd = sdcard.SDCard(sd_spi, machine.Pin(39))
-
-        # Check if SD card is detected
-        print("Initializing SD card...")
         uos.mount(sd, "/sd")
-        print("SD card mounted successfully!")
-
-        # Create the gallery directory if it doesn't exist
-        if not SD_DIR in uos.listdir("/sd"):
-            uos.mkdir(SD_DIR)
-        print("Gallery directory ready!")
-    except OSError as e:
-        if "ENOENT" in str(e):
-            print("No SD card detected! Please insert an SD card.")
-        elif "EEXIST" in str(e):
-            print("SD card already mounted.")
-        else:
-            print(f"Failed to mount SD card: {e}")
-
-# Delete all images in the gallery folder
-def clear_gallery():
-    try:
-        for file in uos.listdir(SD_DIR):
-            filepath = f"{SD_DIR}/{file}"
-            uos.remove(filepath)
-            print(f"Deleted {filepath}")
-        print("Gallery cleared.")
     except Exception as e:
-        print(f"Error clearing gallery: {e}")
+        print(f"Error mounting SD card: {e}")
 
 # Fetch image from Pollinations API
 def fetch_image(prompt):
@@ -124,71 +179,27 @@ def save_image_to_sd(prompt, image_data):
         print(f"Error saving image: {e}")
         return None
 
-# Display image and dynamically adjust backlighting
-# Display image and properly scale to fit 480x480
-def display_image(filepath):
+# Display an image on a specific layer
+def display_image_on_layer(filepath, layer):
     try:
-        # Open the JPEG file
-        j.open_file(filepath)
-
-        # Decode the JPEG at half scale (768x768 -> 384x384)
-        scale = jpegdec.JPEG_SCALE_HALF
-        img_width, img_height = j.get_width() // 2, j.get_height() // 2
-
-        # Calculate centering for 384x384 image on 480x480 display
-        img_x = (WIDTH - img_width) // 2
-        img_y = (HEIGHT - img_height) // 2
-
-        # Decode and display the image
-        j.decode(img_x, img_y, scale, dither=True)
-
-        # Ensure backlight is at full brightness
-        presto.set_backlight(1.0)
-        presto.update()
-
-        print(f"Displayed image from {filepath} with proper scaling and centering.")
+        # Set the active layer
+        display.set_layer(layer)
+        
+        # Open and decode the JPEG file
+        jpeg.open_file(filepath)
+        
+        # Get image dimensions and calculate scaling
+        img_width, img_height = jpeg.get_width(), jpeg.get_height()
+        scale = jpegdec.JPEG_SCALE_HALF if img_width > WIDTH or img_height > HEIGHT else jpegdec.JPEG_SCALE_FULL
+        scaled_width = img_width // (2 if scale == jpegdec.JPEG_SCALE_HALF else 1)
+        scaled_height = img_height // (2 if scale == jpegdec.JPEG_SCALE_HALF else 1)
+        img_x = (WIDTH - scaled_width) // 2
+        img_y = (HEIGHT - scaled_height) // 2
+        
+        # Decode and render the image
+        jpeg.decode(img_x, img_y, scale, dither=True)
     except Exception as e:
-        print(f"Error displaying image: {e}")
-
-
-# Main workflow for endless photo viewer
-def endless_photo_viewer():
-    connect_to_wifi()  # Connect to Wi-Fi using secrets.py
-
-    try:
-        mount_sd()
-    except Exception as e:
-        print("Error initializing SD card. Exiting.")
-        return  # Exit if the SD card isn't properly mounted
-
-    prompt_index = 0  # Start with the first prompt
-
-    while True:
-        # Clear the gallery before fetching a new image
-        try:
-            clear_gallery()
-        except Exception as e:
-            print(f"Error clearing gallery: {e}")
-
-        # Get the current prompt and cycle through the list
-        base_prompt = prompts[prompt_index]
-        unique_prompt = generate_unique_prompt(base_prompt)
-
-        # Fetch image for the unique prompt
-        image_data = fetch_image(unique_prompt)
-        if image_data:
-            # Save and display the image
-            filepath = save_image_to_sd(unique_prompt, image_data)
-            if filepath:
-                display_image(filepath)
-        else:
-            print("Skipping due to fetch error.")
-
-        # Move to the next prompt
-        prompt_index = (prompt_index + 1) % len(prompts)
-
-        # Wait for 7 seconds before displaying the next image
-        sleep(7)
+        print(f"Error displaying image on layer {layer}: {e}")
 
 if __name__ == "__main__":
     endless_photo_viewer()
