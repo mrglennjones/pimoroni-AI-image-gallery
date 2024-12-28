@@ -1,4 +1,4 @@
-# pimoroni-presto-AI-image-gallery
+# pimoroni-AI-image-gallery
 
 generates images from an online AI (pollinations.ai), saves them to SD card, display them in sequence
 
